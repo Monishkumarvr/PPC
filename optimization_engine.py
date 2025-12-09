@@ -790,6 +790,77 @@ def build_and_solve_enhanced_milp(
             })
 
     # Order-level shortage summary (unchanged, but now vs net demand)
+    # ---------------------------------------------------------
+    # FIFO ALLOCATION FOR ORDER-LEVEL DATES
+    # ---------------------------------------------------------
+    # Map each order to its production days to find First/Last Moulding Date
+    
+    # 1. Gather all production per part: {part: [(day_idx, date, boxes_produced), ...]}
+    production_by_part = {j: [] for j in products}
+    for j in products:
+        for ti in T:
+            val = X[j][ti].value()
+            if val and val > 0.1:
+                boxes = int(round(val))
+                production_by_part[j].append((ti, days[ti].date(), boxes))
+        # Sort by day just in case
+        production_by_part[j].sort(key=lambda x: x[0])
+
+    # 2. Iterate orders (sorted by due date) and allocate
+    order_dates = {} # order_id -> {first_date, last_date}
+    
+    # Work on a copy of production to consume it
+    remaining_production = {j: [list(item) for item in production_by_part[j]] for j in products}
+    
+    # Sort orders by due date to respect FIFO fulfillment assumption
+    # (Though the optimization might have shuffled priorities, FIFO is standard for "when did my order get made")
+    sorted_orders = sorted(order_list, key=lambda o: o["due_date"])
+    
+    for order in sorted_orders:
+        j = order["part"]
+        oid = order["order_id"]
+        qty_needed = order["qty_boxes"]
+        
+        # Calculate shortage to know how much was actually made for this order
+        short_val = ShortOrder[(j, oid)].value() or 0
+        qty_fulfilled = max(0, qty_needed - int(round(short_val)))
+        
+        if qty_fulfilled <= 0:
+            order_dates[oid] = {"first": None, "last": None}
+            continue
+            
+        first_date = None
+        last_date = None
+        
+        # Consume from remaining production
+        prod_stream = remaining_production[j]
+        
+        while qty_fulfilled > 0 and prod_stream:
+            day_idx, day_date, avail = prod_stream[0]
+            
+            if avail <= 0:
+                prod_stream.pop(0)
+                continue
+                
+            take = min(qty_fulfilled, avail)
+            
+            if first_date is None:
+                first_date = day_date
+            last_date = day_date
+            
+            # Update stream
+            prod_stream[0][2] -= take
+            qty_fulfilled -= take
+            
+            if prod_stream[0][2] <= 0:
+                prod_stream.pop(0)
+                
+        order_dates[oid] = {"first": first_date, "last": last_date}
+
+    # ---------------------------------------------------------
+    # GENERATE REPORT
+    # ---------------------------------------------------------
+
     order_shortage_rows: List[Dict] = []
 
     for order in order_list:
@@ -808,17 +879,44 @@ def build_and_solve_enhanced_milp(
             status = "LATE"
         else:
             status = "SHORT"
+            
+        # Extended fields
+        dates = order_dates.get(k, {"first": None, "last": None})
+        first_mould_date = dates["first"]
+        last_mould_date = dates["last"]
+        
+        days_before_delivery = None
+        lead_time_status = "N/A"
+        lead_time_penalty_val = 0.0
+        
+        if first_mould_date:
+            due_date_date = order["due_date"].date()
+            delta = (due_date_date - first_mould_date).days
+            days_before_delivery = delta
+            
+            if delta < config.leadtime_required_days:
+                lead_time_status = "VIOLATION"
+                shortfall = config.leadtime_required_days - delta
+                # Approximate penalty calculation for reporting (cost is abstract)
+                lead_time_penalty_val = shortfall * config.leadtime_penalty_per_day * (order["qty_boxes"] - short_boxes)
+            else:
+                lead_time_status = "OK"
 
         order_shortage_rows.append({
             "FG Code": j,
             "Sales Order No": order["sales_order_no"],
             "Due Date": order["due_date"].date(),
+            "First Moulding Date": first_mould_date,
+            "Last Moulding Date": last_mould_date,
+            "Days Before Delivery": days_before_delivery,
+            "Lead Time Status": lead_time_status,
+            "Lead Time Penalty": lead_time_penalty_val,
             "Days Until Due": order["days_until_due"],
             "Order Qty (pieces)": order["qty_pieces"],
             "Order Qty (boxes)": order["qty_boxes"],
             "Shortage (boxes)": short_boxes,
             "Shortage (pieces)": short_pieces,
-            "Fulfillment %": 0.0 if short_boxes > 0 else 100.0,
+            "Fulfillment %": 0.0 if short_boxes >= order["qty_boxes"] else round((1 - short_boxes/order["qty_boxes"])*100, 1),
             "Status": status,
             "Priority": "HIGH" if days_late > 0 else ("MEDIUM" if order["days_until_due"] < 30 else "LOW"),
         })
