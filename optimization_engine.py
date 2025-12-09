@@ -28,7 +28,9 @@ class OptimizationConfig:
                  leadtime_required_days: int = 14,
                  leadtime_penalty_per_day: float = 25.0,
                  production_lateness_penalty: float = 1000.0,
-                 planning_date: datetime = None
+                 planning_date: datetime = None,
+                 planning_end_date: datetime = None,
+                 solver_timeout: int = 600
                  ):
         self.daily_melt_tons = daily_melt_tons
         self.daily_melt_kg = daily_melt_tons * 1000.0
@@ -44,6 +46,8 @@ class OptimizationConfig:
         self.leadtime_penalty_per_day = leadtime_penalty_per_day
         self.production_lateness_penalty = production_lateness_penalty
         self.planning_date = planning_date if planning_date else datetime.now()
+        self.planning_end_date = planning_end_date
+        self.solver_timeout = solver_timeout
 
 # ----------------- WIP LOADER -----------------
 
@@ -131,14 +135,17 @@ def load_casting_data_from_excel(
     )
     # Filter out NaT dates if any to avoid errors in max/min
     valid_dates = sales_order["Delivery Date"].dropna()
-    if not valid_dates.empty:
-        max_date = valid_dates.max()
-    else:
-        # Fallback if no dates
-        max_date = config.planning_date + pd.Timedelta(days=30)
     
     start_date = config.planning_date
-    end_date = max_date
+    
+    if config.planning_end_date:
+        end_date = config.planning_end_date
+    elif not valid_dates.empty:
+        max_date = valid_dates.max()
+        end_date = max_date
+    else:
+        # Fallback if no dates and no end date specified
+        end_date = config.planning_date + pd.Timedelta(days=30)
 
     # WIP inventory (may be empty)
     wip_inventory = load_wip_data(xls)
@@ -640,7 +647,7 @@ def build_and_solve_enhanced_milp(
     # Solve
     # If log_path is provided, we direct output there and set msg=True
     solver_options = {
-        "timeLimit": 600,
+        "timeLimit": config.solver_timeout,
         "gapRel": 0.005,
         "threads": 8,
     }
