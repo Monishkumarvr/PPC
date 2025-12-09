@@ -57,6 +57,15 @@ st.markdown("""
         padding: 1rem;
         border-left: 5px solid #2c3e50;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        color: #2c3e50;
+    }
+    
+    div[data-testid="stMetric"] label {
+        color: #4a4a4a !important;
+    }
+    
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #2c3e50 !important;
     }
 
     /* Remove default padding */
