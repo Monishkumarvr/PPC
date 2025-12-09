@@ -352,6 +352,132 @@ def load_casting_data_from_excel(
     )
 
 
+# ----------------- VALIDATION & RECOMMENDATION -----------------
+
+def validate_excel_sheets(file_content: Any) -> Dict[str, bool]:
+    """
+    Validate the presence of required sheets in the Excel file.
+    Returns a dict {sheet_name: is_present}
+    """
+    required_sheets = ["Part Master", "Sales Order", "Machine Constraints", "Mould Box Capacity"]
+    optional_sheets = ["Stage WIP"]
+    
+    try:
+        xls = pd.ExcelFile(file_content)
+        sheet_names = xls.sheet_names
+        
+        status = {}
+        for sheet in required_sheets + optional_sheets:
+            status[sheet] = sheet in sheet_names
+            
+        return status
+    except Exception:
+        return {sheet: False for sheet in required_sheets + optional_sheets}
+
+
+def generate_recommendations(
+    capacity_rows: List[Dict], 
+    box_utilization_rows: List[Dict], 
+    shortage_rows: List[Dict]
+) -> List[Dict]:
+    """
+    Generate heuristic recommendations based on optimization results.
+    Returns a list of dicts with 'type', 'message', 'severity'.
+    """
+    recommendations = []
+    
+    # 1. Analyze Order Shortages
+    df_shortage = pd.DataFrame(shortage_rows)
+    if not df_shortage.empty:
+        total_shortage_orders = len(df_shortage[df_shortage['Status'] != 'ON TIME'])
+        late_orders = len(df_shortage[df_shortage['Status'] == 'LATE'])
+        
+        if total_shortage_orders > 0:
+            recommendations.append({
+                "type": "Shortage",
+                "message": f"{total_shortage_orders} orders are delayed or short. {late_orders} are already past due date. Consider expediting production for high-priority late orders.",
+                "severity": "High"
+            })
+            
+            # Identify most delayed product
+            if 'Days Until Due' in df_shortage.columns:
+                worst_order = df_shortage.sort_values('Days Until Due').iloc[0]
+                if worst_order['Days Until Due'] < 0:
+                    recommendations.append({
+                        "type": "Prioritization",
+                        "message": f"Critical Delay: Order '{worst_order['Sales Order No']}' for '{worst_order['FG Code']}' is overdue by {abs(worst_order['Days Until Due'])} days. Prioritize this FG Code on the line immediately.",
+                        "severity": "Critical"
+                    })
+
+    # 2. Analyze Box Bottlenecks
+    df_boxes = pd.DataFrame(box_utilization_rows)
+    if not df_boxes.empty:
+        # Group by box size and calculate average utilization
+        box_summary = df_boxes.groupby('Box_Size').agg({
+            'Utilization_%': 'mean',
+            'Max_Boxes': 'first'
+        }).reset_index()
+        
+        critical_boxes = box_summary[box_summary['Utilization_%'] > 85]
+        
+        for _, row in critical_boxes.iterrows():
+            box_size = row['Box_Size']
+            util = row['Utilization_%']
+            current_inv = row['Max_Boxes']
+            
+            # Simple heuristic: suggest adding 10-20% more boxes
+            suggested_add = max(2, int(current_inv * 0.15))
+            
+            recommendations.append({
+                "type": "Capacity",
+                "message": f"High usage detected for Box Size {box_size} (Avg Util: {util:.1f}%). This is likely a bottleneck. Recommendation: Purchase {suggested_add} additional boxes of this size to relieve pressure.",
+                "severity": "High" if util > 95 else "Medium"
+            })
+
+    # 3. Analyze Line/Melt Capacity
+    df_cap = pd.DataFrame(capacity_rows)
+    if not df_cap.empty:
+        avg_melt = df_cap['Melt_Utilization_%'].mean()
+        max_melt = df_cap['Melt_Utilization_%'].max()
+        
+        avg_small = df_cap['Small_Utilization_%'].mean()
+        avg_big = df_cap['Big_Utilization_%'].mean()
+        
+        if avg_melt > 90:
+             recommendations.append({
+                "type": "Capacity",
+                "message": f"Melt capacity is critically tight (Avg: {avg_melt:.1f}%, Max: {max_melt:.1f}%). Moulding is likely limited by liquid metal availability. Consider adding a shift or increasing melt batch frequency.",
+                "severity": "High"
+            })
+        
+        if avg_small > 90:
+             recommendations.append({
+                "type": "Capacity",
+                "message": f"Small Vacuum Line is heavily loaded (Avg: {avg_small:.1f}%). Check if some parts can be moved to Big Line or if cycle times can be optimized.",
+                "severity": "Medium"
+            })
+            
+        if avg_big > 90:
+             recommendations.append({
+                "type": "Capacity",
+                "message": f"Big Vacuum Line is heavily loaded (Avg: {avg_big:.1f}%). Ensure OEE is maximized during peak days.",
+                "severity": "Medium"
+            })
+
+    # 4. WIP Analysis
+    # If we had access to input wip stats easily here we could add it, but based on results:
+    # (We don't pass raw WIP stats to this function, only outputs, so skip for now)
+    
+    if not recommendations:
+        recommendations.append({
+            "type": "General",
+            "message": "Production plan looks healthy. No critical resource bottlenecks or major shortages detected.",
+            "severity": "Low"
+        })
+        
+    return recommendations
+
+
 # ----------------- MILP SOLVER (WIP + LEAD-TIME) -----------------
 
 def build_and_solve_enhanced_milp(
@@ -371,7 +497,8 @@ def build_and_solve_enhanced_milp(
     order_list: List[Dict],
     wip_coverage_boxes: Dict[str, float],
     gross_demand_boxes: Dict[str, float],
-    config: OptimizationConfig
+    config: OptimizationConfig,
+    log_path: Optional[str] = None
 ):
     T = list(range(len(days)))
     small_products = [j for j in products if line.get(j, "small") == "small"]
@@ -511,12 +638,20 @@ def build_and_solve_enhanced_milp(
     prob += pulp.lpSum(obj_parts), "TotalCost"
 
     # Solve
-    solver = pulp.PULP_CBC_CMD(
-        msg=False, # Silence output for web app
-        timeLimit=600,
-        gapRel=0.005,
-        threads=8,
-    )
+    # If log_path is provided, we direct output there and set msg=True
+    solver_options = {
+        "timeLimit": 600,
+        "gapRel": 0.005,
+        "threads": 8,
+    }
+    
+    if log_path:
+        solver_options["msg"] = True
+        solver_options["logPath"] = log_path
+    else:
+        solver_options["msg"] = False
+
+    solver = pulp.PULP_CBC_CMD(**solver_options)
     prob.solve(solver)
 
     if prob.status != pulp.LpStatusOptimal and prob.status != pulp.LpStatusIntegerFeasible:
