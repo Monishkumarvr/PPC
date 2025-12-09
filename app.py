@@ -316,13 +316,14 @@ else:
         st.markdown("---")
         
         # --- Visualizations ---
-        # Tab Order: Production Schedule, Order Fulfillment, Capacity Analysis, Daily Box Status, AI Assistant
-        tab_schedule, tab_fulfill, tab_cap, tab_box, tab_ai = st.tabs([
+        # Tab Order: Production Schedule, Order Fulfillment, Capacity Analysis, Daily Box Status, AI Assistant, Input Data
+        tab_schedule, tab_fulfill, tab_cap, tab_box, tab_ai, tab_input = st.tabs([
             "🗓️ Production Schedule", 
             "🚚 Order Fulfillment", 
             "📈 Capacity Analysis",
             "📦 Daily Box Status",
-            "🤖 AI Assistant"
+            "🤖 AI Assistant",
+            "📂 Input Data"
         ])
         
         with tab_schedule:
@@ -457,6 +458,22 @@ else:
                             severity_icon = "🔴" if rec['severity'] == "Critical" else ("🟠" if rec['severity'] == "High" else "🟡")
                             with st.expander(f"{severity_icon} {rec['type']} Recommendation ({rec['severity']})", expanded=True):
                                 st.markdown(rec['message'])
+
+        with tab_input:
+            st.subheader("📂 Master Data Used")
+            if 'master_data' in st.session_state:
+                md_sheets = st.session_state['master_data']
+                sheet_names = list(md_sheets.keys())
+                
+                if sheet_names:
+                    i_tabs = st.tabs(sheet_names)
+                    for idx, s_name in enumerate(sheet_names):
+                        with i_tabs[idx]:
+                            st.dataframe(md_sheets[s_name], use_container_width=True)
+                else:
+                    st.info("No Master Data found.")
+            else:
+                st.info("Master Data not loaded.")
 
         # --- Download Section ---
         st.markdown("---")
