@@ -316,17 +316,60 @@ else:
         st.markdown("---")
         
         # --- Visualizations ---
-        # Tab Order: Production Schedule, Order Fulfillment, Capacity Analysis, AI Assistant
-        tab_schedule, tab_fulfill, tab_cap, tab_ai = st.tabs([
+        # Tab Order: Production Schedule, Order Fulfillment, Capacity Analysis, Daily Box Status, AI Assistant
+        tab_schedule, tab_fulfill, tab_cap, tab_box, tab_ai = st.tabs([
             "🗓️ Production Schedule", 
             "🚚 Order Fulfillment", 
             "📈 Capacity Analysis",
+            "📦 Daily Box Status",
             "🤖 AI Assistant"
         ])
         
         with tab_schedule:
             st.subheader("Daily Production Plan")
             st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+            
+            with st.expander("📊 Custom Pivot Analysis"):
+                if not schedule_df.empty:
+                    c1, c2, c3, c4 = st.columns(4)
+                    
+                    available_cols = schedule_df.columns.tolist()
+                    numeric_cols = schedule_df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+                    
+                    with c1:
+                        pivot_index = st.multiselect("Rows (Index)", available_cols, default=["Date"])
+                    with c2:
+                        pivot_columns = st.multiselect("Columns", available_cols, default=["FG Code"])
+                    with c3:
+                        pivot_values = st.selectbox("Values", numeric_cols, index=numeric_cols.index("Boxes") if "Boxes" in numeric_cols else 0)
+                    with c4:
+                        pivot_agg = st.selectbox("Aggregation", ["sum", "mean", "count", "min", "max"], index=0)
+                    
+                    if pivot_index and pivot_values:
+                        try:
+                            # Filter option (e.g. by Box Size)
+                            if "Box_Size" in available_cols:
+                                all_boxes = ["All"] + sorted(schedule_df['Box_Size'].astype(str).unique().tolist())
+                                filter_box = st.selectbox("Filter Box Size (Optional)", all_boxes)
+                                pivot_data = schedule_df if filter_box == "All" else schedule_df[schedule_df['Box_Size'] == filter_box]
+                            else:
+                                pivot_data = schedule_df
+
+                            if not pivot_data.empty:
+                                pivot_table = pivot_data.pivot_table(
+                                    index=pivot_index,
+                                    columns=pivot_columns if pivot_columns else None,
+                                    values=pivot_values,
+                                    aggfunc=pivot_agg,
+                                    fill_value=0
+                                )
+                                st.dataframe(pivot_table, use_container_width=True)
+                            else:
+                                st.info("No data available for the selected filter.")
+                        except Exception as e:
+                            st.error(f"Could not create pivot table: {e}")
+                    else:
+                        st.warning("Please select at least one Row and Value.")
 
         with tab_fulfill:
             st.subheader("Order Fulfillment Status")
@@ -343,10 +386,10 @@ else:
                 st.plotly_chart(fig_pie, use_container_width=True)
             
             with c_table:
-                st.markdown("#### Delayed / Short Orders")
-                problem_orders = shortage_df[shortage_df['Status'] != 'ON TIME'].sort_values('Days Until Due')
+                st.markdown("#### Detailed Order List")
+                # Display the full dataframe with new columns
                 st.dataframe(
-                    problem_orders[['Sales Order No', 'FG Code', 'Due Date', 'Order Qty (pieces)', 'Shortage (pieces)', 'Status', 'Days Until Due']],
+                    shortage_df,
                     hide_index=True,
                     use_container_width=True
                 )
@@ -390,6 +433,10 @@ else:
                     title="Box Utilization Heatmap"
                 )
                 st.plotly_chart(fig_heat, use_container_width=True)
+
+        with tab_box:
+            st.subheader("Daily Box Utilization Status")
+            st.dataframe(box_df, use_container_width=True, hide_index=True)
 
         with tab_ai:
             st.subheader("🤖 AI Assistant Recommendations")
