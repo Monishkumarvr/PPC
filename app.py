@@ -5,6 +5,10 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 import optimization_engine
 import io
+import concurrent.futures
+import time
+import tempfile
+import os
 
 # Set page configuration
 st.set_page_config(
@@ -98,6 +102,28 @@ with st.sidebar:
     st.subheader("1. Input Data")
     uploaded_file = st.file_uploader("Upload Master Data (Excel)", type=["xlsx"])
     
+    file_valid = False
+    if uploaded_file:
+        sheet_status = optimization_engine.validate_excel_sheets(uploaded_file)
+        
+        st.markdown("**Data Validation:**")
+        all_required_present = True
+        for sheet, present in sheet_status.items():
+            if sheet == "Stage WIP": continue # Optional
+            icon = "✅" if present else "❌"
+            if not present: all_required_present = False
+            st.markdown(f"{icon} {sheet}")
+        
+        # Check optional
+        if sheet_status.get("Stage WIP"):
+            st.markdown(f"✅ Stage WIP (Optional)")
+        else:
+            st.markdown(f"ℹ️ Stage WIP (Not Found)")
+            
+        file_valid = all_required_present
+        if not file_valid:
+            st.error("Missing required sheets! Please check your file.")
+    
     st.subheader("2. Planning Parameters")
     planning_date = st.date_input("Planning Start Date", date.today())
     
@@ -111,8 +137,10 @@ with st.sidebar:
         shortage_penalty = st.number_input("Shortage Penalty", value=100000000.0)
         leadtime_days = st.number_input("Required Lead Time (Days)", value=14)
         lateness_penalty = st.number_input("Lateness Penalty / Day", value=50.0)
+        early_penalty = st.number_input("Early Production Penalty", value=0.0)
+        leadtime_pen_val = st.number_input("Lead Time Penalty / Day", value=25.0)
     
-    run_btn = st.button("Run Optimization", type="primary")
+    run_btn = st.button("Run Optimization", type="primary", disabled=not file_valid)
 
 # Main Content Area
 
@@ -131,69 +159,94 @@ if uploaded_file is None:
         """)
 
 else:
-    if run_btn:
-        with st.spinner("🔄 Running Optimization... This may take a few minutes."):
-            try:
-                # 1. Setup Config
-                config = optimization_engine.OptimizationConfig(
-                    daily_melt_tons=daily_melt_tons,
-                    line_hours_per_day=line_hours,
-                    line_oee=line_oee,
-                    shortage_penalty=shortage_penalty,
-                    leadtime_required_days=int(leadtime_days),
-                    lateness_penalty_per_day=lateness_penalty,
-                    planning_date=pd.to_datetime(planning_date)
-                )
-                
-                # 2. Load Data
+    if run_btn and file_valid:
+        try:
+            # 1. Setup Config
+            config = optimization_engine.OptimizationConfig(
+                daily_melt_tons=daily_melt_tons,
+                line_hours_per_day=line_hours,
+                line_oee=line_oee,
+                shortage_penalty=shortage_penalty,
+                leadtime_required_days=int(leadtime_days),
+                lateness_penalty_per_day=lateness_penalty,
+                early_production_penalty=early_penalty,
+                leadtime_penalty_per_day=leadtime_pen_val,
+                planning_date=pd.to_datetime(planning_date)
+            )
+            
+            # 2. Load Data (Fast)
+            with st.spinner("Loading Data..."):
                 (
                     products, days, demand_boxes, bunch_weight_kg, box_qty,
                     line_time_min, cycle_days, line, box_size_of, box_max_boxes,
                     max_melt_kg_per_day, max_time_small_min, max_time_big_min,
                     order_list, wip_coverage_boxes, gross_demand_boxes
                 ) = optimization_engine.load_casting_data_from_excel(uploaded_file, config)
-                
-                # 3. Solve
-                result = optimization_engine.build_and_solve_enhanced_milp(
+
+            # 3. Solve (Slow - Threaded with Log)
+            status_container = st.status("🚀 Running Optimization...", expanded=True)
+            log_container = status_container.empty()
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as tmp_log:
+                log_path = tmp_log.name
+            
+            def run_optimization():
+                return optimization_engine.build_and_solve_enhanced_milp(
                     products, days, demand_boxes, bunch_weight_kg, box_qty,
                     line_time_min, cycle_days, line, box_size_of, box_max_boxes,
                     max_melt_kg_per_day, max_time_small_min, max_time_big_min,
-                    order_list, wip_coverage_boxes, gross_demand_boxes, config
+                    order_list, wip_coverage_boxes, gross_demand_boxes, config,
+                    log_path=log_path
                 )
-                
-                # Check for solver failure (result is a tuple, index 0 is prob)
-                # If prob.status is not optimal or feasible, we might have issues
-                # optimization_engine logic returns valid lists (empty or not) even if failed
-                # but let's check the problem status if available
-                prob = result[0]
-                
-                # Pulp status: 1=Optimal, -1=Infeasible, -2=Unbounded, -3=Undefined, 0=Not Solved
-                # However, optimization_engine.py catches this and returns a tuple.
-                
-                if prob is None or (prob.status != 1 and prob.status != 0): # 1 is Optimal in Pulp constants usually, but safer to rely on result presence
-                    # Wait, build_and_solve_enhanced_milp returns (prob, ...)
-                    # If prob is None (e.g. if we modified engine to return None on error), handle it.
-                    pass
-                
-                # Using the pattern from optimization_engine: it returns the tuple regardless.
-                # If solve failed, lists might be empty.
-                
-                prob, schedule_rows, order_shortage_rows, daily_capacity_rows, box_utilization_rows = result
 
-                if not schedule_rows and not order_shortage_rows:
-                     st.warning("Optimization finished but returned no schedule. This might mean the problem was infeasible or no orders were selected.")
-                else:
-                    st.session_state['results'] = {
-                        'schedule_rows': schedule_rows,
-                        'order_shortage_rows': order_shortage_rows,
-                        'daily_capacity_rows': daily_capacity_rows,
-                        'box_utilization_rows': box_utilization_rows
-                    }
-                    st.success("✅ Optimization Complete!")
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_optimization)
+                
+                # Poll logs while running
+                while not future.done():
+                    time.sleep(0.5)
+                    try:
+                        with open(log_path, "r") as f:
+                            lines = f.readlines()
+                            if lines:
+                                # Show last 15 lines
+                                last_lines = "".join(lines[-15:])
+                                log_container.code(last_lines, language="text")
+                    except Exception:
+                        pass
+                
+                result = future.result()
+                
+            # Final log update
+            try:
+                with open(log_path, "r") as f:
+                    full_log = f.read()
+                    # Keep full log in session state if user wants to see it?
+                    # For now just show "Done"
+                    log_container.code(full_log[-1000:], language="text")
+                os.unlink(log_path)
+            except:
+                pass
+            
+            status_container.update(label="✅ Optimization Complete!", state="complete", expanded=False)
 
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
-                st.exception(e)
+            # Check results
+            prob = result[0]
+            prob, schedule_rows, order_shortage_rows, daily_capacity_rows, box_utilization_rows = result
+
+            if not schedule_rows and not order_shortage_rows:
+                    st.warning("Optimization finished but returned no schedule. This might mean the problem was infeasible or no orders were selected.")
+            else:
+                st.session_state['results'] = {
+                    'schedule_rows': schedule_rows,
+                    'order_shortage_rows': order_shortage_rows,
+                    'daily_capacity_rows': daily_capacity_rows,
+                    'box_utilization_rows': box_utilization_rows
+                }
+
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            st.exception(e)
 
     # Display Results if available
     if 'results' in st.session_state:
@@ -225,11 +278,43 @@ else:
         st.markdown("---")
         
         # --- Visualizations ---
+        # Tab Order: Production Schedule, Order Fulfillment, Capacity Analysis, AI Assistant
+        tab_schedule, tab_fulfill, tab_cap, tab_ai = st.tabs([
+            "🗓️ Production Schedule", 
+            "🚚 Order Fulfillment", 
+            "📈 Capacity Analysis",
+            "🤖 AI Assistant"
+        ])
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📈 Capacity Utilization", "📦 Box Utilization", "🚚 Order Fulfillment", "🗓️ Production Schedule"])
-        
-        with tab1:
-            st.subheader("Daily Capacity Utilization")
+        with tab_schedule:
+            st.subheader("Daily Production Plan")
+            st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+
+        with tab_fulfill:
+            st.subheader("Order Fulfillment Status")
+            
+            c_pie, c_table = st.columns([1, 2])
+            
+            with c_pie:
+                fig_pie = px.pie(
+                    shortage_df, names='Status', title="Status Distribution",
+                    color='Status',
+                    color_discrete_map={'ON TIME': '#2ecc71', 'LATE': '#e74c3c', 'SHORT': '#f1c40f'},
+                    hole=0.4
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            with c_table:
+                st.markdown("#### Delayed / Short Orders")
+                problem_orders = shortage_df[shortage_df['Status'] != 'ON TIME'].sort_values('Days Until Due')
+                st.dataframe(
+                    problem_orders[['Sales Order No', 'FG Code', 'Due Date', 'Order Qty (pieces)', 'Shortage (pieces)', 'Status', 'Days Until Due']],
+                    hide_index=True,
+                    use_container_width=True
+                )
+                
+        with tab_cap:
+            st.subheader("Capacity Utilization")
             
             # Melt Utilization Chart
             fig_melt = px.bar(
@@ -252,54 +337,41 @@ else:
                 range_y=[0, 110]
             )
             st.plotly_chart(fig_line, use_container_width=True)
-
-        with tab2:
-            st.subheader("Mould Box Bottlenecks")
             
-            # Heatmap of utilization
-            # Prepare data for heatmap: Box Size vs Date with Utilization as value
+            st.markdown("---")
+            st.subheader("Mould Box Bottlenecks")
             if not box_df.empty:
                 heatmap_data = box_df.pivot(index='Box_Size', columns='Date', values='Utilization_%')
-                
                 fig_heat = px.imshow(
                     heatmap_data,
                     labels=dict(x="Date", y="Box Size", color="Utilization %"),
                     x=heatmap_data.columns,
                     y=heatmap_data.index,
-                    color_continuous_scale='RdYlGn_r', # Red is high utilization (bad/busy) ? Or maybe Green to Red
-                    # Usually 100% is bad if it restricts, so let's use a scale where high is 'hot'
+                    color_continuous_scale='RdYlGn_r',
                     aspect="auto",
                     title="Box Utilization Heatmap"
                 )
                 st.plotly_chart(fig_heat, use_container_width=True)
-                
-                # Critical Boxes Table
-                st.markdown("#### Critical Box Sizes (>80% Avg Utilization)")
-                box_summary = box_df.groupby('Box_Size')['Utilization_%'].mean().sort_values(ascending=False).reset_index()
-                critical_boxes = box_summary[box_summary['Utilization_%'] > 80]
-                st.dataframe(critical_boxes, hide_index=True)
 
-        with tab3:
-            st.subheader("Order Fulfillment Status")
+        with tab_ai:
+            st.subheader("🤖 AI Assistant Recommendations")
+            st.info("The AI Assistant analyzes the optimization results to identify bottlenecks and suggest actionable improvements.")
             
-            fig_pie = px.pie(
-                shortage_df, names='Status', title="Order Status Distribution",
-                color='Status',
-                color_discrete_map={'ON TIME': '#2ecc71', 'LATE': '#e74c3c', 'SHORT': '#f1c40f'}
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-            
-            st.markdown("#### Delayed / Short Orders")
-            problem_orders = shortage_df[shortage_df['Status'] != 'ON TIME'].sort_values('Days Until Due')
-            st.dataframe(
-                problem_orders[['Sales Order No', 'FG Code', 'Due Date', 'Order Qty (pieces)', 'Shortage (pieces)', 'Status', 'Days Until Due']],
-                hide_index=True,
-                use_container_width=True
-            )
-
-        with tab4:
-            st.subheader("Production Schedule Details")
-            st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+            if st.button("Generate Recommendations", type="primary"):
+                with st.spinner("Analyzing schedule data..."):
+                    recommendations = optimization_engine.generate_recommendations(
+                        results['daily_capacity_rows'],
+                        results['box_utilization_rows'],
+                        results['order_shortage_rows']
+                    )
+                    
+                    if not recommendations:
+                        st.success("No critical issues found. The plan is optimized!")
+                    else:
+                        for rec in recommendations:
+                            severity_icon = "🔴" if rec['severity'] == "Critical" else ("🟠" if rec['severity'] == "High" else "🟡")
+                            with st.expander(f"{severity_icon} {rec['type']} Recommendation ({rec['severity']})", expanded=True):
+                                st.markdown(rec['message'])
 
         # --- Download Section ---
         st.markdown("---")
