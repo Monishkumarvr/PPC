@@ -126,6 +126,7 @@ with st.sidebar:
     
     st.subheader("2. Planning Parameters")
     planning_date = st.date_input("Planning Start Date", date.today())
+    planning_end_date = st.date_input("Planning End Date (Optional)", value=None)
     
     daily_melt_tons = st.number_input("Daily Melt Capacity (Tons)", value=250.0, step=10.0)
     line_hours = st.number_input("Line Hours per Day", value=16.0, step=1.0)
@@ -139,6 +140,7 @@ with st.sidebar:
         lateness_penalty = st.number_input("Lateness Penalty / Day", value=50.0)
         early_penalty = st.number_input("Early Production Penalty", value=0.0)
         leadtime_pen_val = st.number_input("Lead Time Penalty / Day", value=25.0)
+        solver_timeout = st.number_input("Solver Timeout (seconds)", value=600)
     
     run_btn = st.button("Run Optimization", type="primary", disabled=not file_valid)
 
@@ -171,7 +173,9 @@ else:
                 lateness_penalty_per_day=lateness_penalty,
                 early_production_penalty=early_penalty,
                 leadtime_penalty_per_day=leadtime_pen_val,
-                planning_date=pd.to_datetime(planning_date)
+                planning_date=pd.to_datetime(planning_date),
+                planning_end_date=pd.to_datetime(planning_end_date) if planning_end_date else None,
+                solver_timeout=int(solver_timeout)
             )
             
             # 2. Load Data (Fast)
