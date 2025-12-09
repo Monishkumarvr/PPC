@@ -144,19 +144,6 @@ with st.sidebar:
             if not file_valid:
                 st.error("Missing required sheets! Please check your file.")
             
-            # Data Editor Section
-            with st.expander("📝 View & Edit Master Data", expanded=False):
-                data_tabs = st.tabs([s for s in sheet_status.keys() if sheet_status[s]])
-                for i, sheet_name in enumerate(data_tabs):
-                    with data_tabs[i]:
-                        if sheet_name in st.session_state['master_data']:
-                            edited_df = st.data_editor(
-                                st.session_state['master_data'][sheet_name],
-                                num_rows="dynamic",
-                                key=f"editor_{sheet_name}"
-                            )
-                            st.session_state['master_data'][sheet_name] = edited_df
-
     st.subheader("2. Planning Parameters")
     planning_date = st.date_input("Planning Start Date", date.today())
     planning_end_date = st.date_input("Planning End Date (Optional)", value=None)
@@ -194,6 +181,26 @@ if uploaded_file is None:
         """)
 
 else:
+    # Data Editor Section in Main Area
+    if file_valid and 'master_data' in st.session_state:
+        st.subheader("📝 Master Data Editor")
+        with st.expander("View & Edit Uploaded Data", expanded=False):
+            sheet_status = optimization_engine.validate_excel_sheets(st.session_state['master_data'])
+            valid_sheets = [s for s in sheet_status.keys() if sheet_status[s]]
+            
+            if valid_sheets:
+                data_tabs = st.tabs(valid_sheets)
+                for i, sheet_name in enumerate(data_tabs):
+                    with data_tabs[i]:
+                        if sheet_name in st.session_state['master_data']:
+                            edited_df = st.data_editor(
+                                st.session_state['master_data'][sheet_name],
+                                num_rows="dynamic",
+                                key=f"editor_main_{sheet_name}",
+                                use_container_width=True
+                            )
+                            st.session_state['master_data'][sheet_name] = edited_df
+
     if run_btn and file_valid:
         try:
             # 1. Setup Config
