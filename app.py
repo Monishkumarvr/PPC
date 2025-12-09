@@ -113,26 +113,50 @@ with st.sidebar:
     
     file_valid = False
     if uploaded_file:
-        sheet_status = optimization_engine.validate_excel_sheets(uploaded_file)
-        
-        st.markdown("**Data Validation:**")
-        all_required_present = True
-        for sheet, present in sheet_status.items():
-            if sheet == "Stage WIP": continue # Optional
-            icon = "✅" if present else "❌"
-            if not present: all_required_present = False
-            st.markdown(f"{icon} {sheet}")
-        
-        # Check optional
-        if sheet_status.get("Stage WIP"):
-            st.markdown(f"✅ Stage WIP (Optional)")
-        else:
-            st.markdown(f"ℹ️ Stage WIP (Not Found)")
+        # Load data into session state if new file uploaded
+        if 'last_uploaded_file' not in st.session_state or st.session_state['last_uploaded_file'] != uploaded_file.name:
+            try:
+                dfs = pd.read_excel(uploaded_file, sheet_name=None)
+                st.session_state['master_data'] = dfs
+                st.session_state['last_uploaded_file'] = uploaded_file.name
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+
+        # Validate from session state
+        if 'master_data' in st.session_state:
+            sheet_status = optimization_engine.validate_excel_sheets(st.session_state['master_data'])
             
-        file_valid = all_required_present
-        if not file_valid:
-            st.error("Missing required sheets! Please check your file.")
-    
+            st.markdown("**Data Validation:**")
+            all_required_present = True
+            for sheet, present in sheet_status.items():
+                if sheet == "Stage WIP": continue # Optional
+                icon = "✅" if present else "❌"
+                if not present: all_required_present = False
+                st.markdown(f"{icon} {sheet}")
+            
+            # Check optional
+            if sheet_status.get("Stage WIP"):
+                st.markdown(f"✅ Stage WIP (Optional)")
+            else:
+                st.markdown(f"ℹ️ Stage WIP (Not Found)")
+                
+            file_valid = all_required_present
+            if not file_valid:
+                st.error("Missing required sheets! Please check your file.")
+            
+            # Data Editor Section
+            with st.expander("📝 View & Edit Master Data", expanded=False):
+                data_tabs = st.tabs([s for s in sheet_status.keys() if sheet_status[s]])
+                for i, sheet_name in enumerate(data_tabs):
+                    with data_tabs[i]:
+                        if sheet_name in st.session_state['master_data']:
+                            edited_df = st.data_editor(
+                                st.session_state['master_data'][sheet_name],
+                                num_rows="dynamic",
+                                key=f"editor_{sheet_name}"
+                            )
+                            st.session_state['master_data'][sheet_name] = edited_df
+
     st.subheader("2. Planning Parameters")
     planning_date = st.date_input("Planning Start Date", date.today())
     planning_end_date = st.date_input("Planning End Date (Optional)", value=None)
@@ -187,14 +211,15 @@ else:
                 solver_timeout=int(solver_timeout)
             )
             
-            # 2. Load Data (Fast)
-            with st.spinner("Loading Data..."):
+            # 2. Load Data (Fast) - From Session State (Edited Data)
+            with st.spinner("Processing Data..."):
+                input_data = st.session_state['master_data']
                 (
                     products, days, demand_boxes, bunch_weight_kg, box_qty,
                     line_time_min, cycle_days, line, box_size_of, box_max_boxes,
                     max_melt_kg_per_day, max_time_small_min, max_time_big_min,
                     order_list, wip_coverage_boxes, gross_demand_boxes
-                ) = optimization_engine.load_casting_data_from_excel(uploaded_file, config)
+                ) = optimization_engine.process_casting_data(input_data, config)
 
             # 3. Solve (Slow - Threaded with Log)
             status_container = st.status("🚀 Running Optimization...", expanded=True)
