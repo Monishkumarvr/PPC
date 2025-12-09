@@ -51,7 +51,7 @@ class OptimizationConfig:
 
 # ----------------- WIP LOADER -----------------
 
-def load_wip_data(xls: pd.ExcelFile) -> Dict[str, Dict[str, float]]:
+def load_wip_data(wip_df: Optional[pd.DataFrame]) -> Dict[str, Dict[str, float]]:
     """
     Load WIP (Work-in-Progress) inventory from Stage WIP sheet.
 
@@ -59,11 +59,9 @@ def load_wip_data(xls: pd.ExcelFile) -> Dict[str, Dict[str, float]]:
         {fg_code: {'CS': qty, 'GR': qty, 'MC': qty, 'SP': qty, 'FG': qty, 'TSQ': qty}}
     """
     try:
-        if "Stage WIP" not in xls.sheet_names:
-            print("\n[!] WARNING: 'Stage WIP' sheet not found. Proceeding without WIP adjustment.")
+        if wip_df is None or wip_df.empty:
+            print("\n[!] WARNING: 'Stage WIP' data not provided. Proceeding without WIP adjustment.")
             return {}
-
-        wip_df = pd.read_excel(xls, "Stage WIP")
 
         wip_inventory: Dict[str, Dict[str, float]] = {}
         total_tsq = 0.0
@@ -111,24 +109,34 @@ def load_wip_data(xls: pd.ExcelFile) -> Dict[str, Dict[str, float]]:
 
 # ----------------- DATA LOADER (WIP + ORDERS) -----------------
 
-def load_casting_data_from_excel(
-    file_content: Any,
+def process_casting_data(
+    input_data: Any,
     config: OptimizationConfig,
 ):
     """
-    Load all casting data, including:
-    - Part master / capacities
-    - Sales orders (order_list)
-    - WIP inventory, used to reduce net moulding demand
-    """
-
-    xls = pd.ExcelFile(file_content)
-
-    part_master = pd.read_excel(xls, "Part Master")
-    sales_order = pd.read_excel(xls, "Sales Order")
-    machine_constraints = pd.read_excel(xls, "Machine Constraints")
-    mould_box_capacity = pd.read_excel(xls, "Mould Box Capacity")
+    Load all casting data from either an uploaded file or a dictionary of DataFrames.
     
+    Args:
+        input_data: Either bytes/file object (Excel) OR Dict[str, pd.DataFrame]
+        config: OptimizationConfig
+    """
+    
+    dfs = {}
+    if isinstance(input_data, dict):
+        # Assume it's already a dict of DataFrames
+        dfs = input_data
+    else:
+        # Assume it's a file path or file-like object
+        dfs = pd.read_excel(input_data, sheet_name=None)
+
+    part_master = dfs.get("Part Master")
+    sales_order = dfs.get("Sales Order")
+    machine_constraints = dfs.get("Machine Constraints")
+    mould_box_capacity = dfs.get("Mould Box Capacity")
+    
+    if part_master is None or sales_order is None or machine_constraints is None or mould_box_capacity is None:
+        raise ValueError("Missing required sheets in input data.")
+
     # Determine date range
     sales_order["Delivery Date"] = pd.to_datetime(
         sales_order["Comitted Delivery Date"], errors="coerce"
@@ -148,7 +156,7 @@ def load_casting_data_from_excel(
         end_date = config.planning_date + pd.Timedelta(days=30)
 
     # WIP inventory (may be empty)
-    wip_inventory = load_wip_data(xls)
+    wip_inventory = load_wip_data(dfs.get("Stage WIP"))
 
     # Working days (Mon–Sat)
     all_days = pd.date_range(start_date, end_date, freq="D")
@@ -361,17 +369,21 @@ def load_casting_data_from_excel(
 
 # ----------------- VALIDATION & RECOMMENDATION -----------------
 
-def validate_excel_sheets(file_content: Any) -> Dict[str, bool]:
+def validate_excel_sheets(input_data: Any) -> Dict[str, bool]:
     """
-    Validate the presence of required sheets in the Excel file.
+    Validate the presence of required sheets in the Excel file or DataFrame dict.
     Returns a dict {sheet_name: is_present}
     """
     required_sheets = ["Part Master", "Sales Order", "Machine Constraints", "Mould Box Capacity"]
     optional_sheets = ["Stage WIP"]
     
     try:
-        xls = pd.ExcelFile(file_content)
-        sheet_names = xls.sheet_names
+        sheet_names = []
+        if isinstance(input_data, dict):
+            sheet_names = list(input_data.keys())
+        else:
+            xls = pd.ExcelFile(input_data)
+            sheet_names = xls.sheet_names
         
         status = {}
         for sheet in required_sheets + optional_sheets:
