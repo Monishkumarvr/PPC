@@ -184,22 +184,25 @@ else:
     # Data Editor Section in Main Area
     if file_valid and 'master_data' in st.session_state:
         st.subheader("📝 Master Data Editor")
-        with st.expander("View & Edit Uploaded Data", expanded=False):
+        with st.expander("View & Edit Uploaded Data", expanded=True):
             sheet_status = optimization_engine.validate_excel_sheets(st.session_state['master_data'])
             valid_sheets = [s for s in sheet_status.keys() if sheet_status[s]]
             
             if valid_sheets:
                 data_tabs = st.tabs(valid_sheets)
-                for i, sheet_name in enumerate(data_tabs):
+                for i, sheet_name in enumerate(valid_sheets):
                     with data_tabs[i]:
-                        if sheet_name in st.session_state['master_data']:
+                        current_df = st.session_state['master_data'].get(sheet_name)
+                        if current_df is not None and not current_df.empty:
                             edited_df = st.data_editor(
-                                st.session_state['master_data'][sheet_name],
+                                current_df,
                                 num_rows="dynamic",
                                 key=f"editor_main_{sheet_name}",
                                 use_container_width=True
                             )
                             st.session_state['master_data'][sheet_name] = edited_df
+                        else:
+                            st.warning(f"Sheet '{sheet_name}' is empty or could not be loaded.")
 
     if run_btn and file_valid:
         try:
