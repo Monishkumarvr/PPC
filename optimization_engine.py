@@ -67,14 +67,25 @@ def load_wip_data(wip_df: Optional[pd.DataFrame]) -> Dict[str, Dict[str, float]]
         total_tsq = 0.0
         parts_with_wip = 0
 
+        # Stats for report
+        cs_count = 0
+        cs1_count = 0
+        cs_qty_total = 0.0
+        cs1_qty_total = 0.0
+
         for _, row in wip_df.iterrows():
             casting_item = str(row.get("CastingItem", "")).strip()
             if not casting_item:
                 continue
 
-            # Convert CS-XXX-XXX to XXX-XXX
-            if casting_item.upper().startswith("CS-"):
+            # Convert CS1-XXX-XXX or CS-XXX-XXX to XXX-XXX
+            # Handle CS1- first as it is longer
+            if casting_item.upper().startswith("CS1-"):
+                fg_code = casting_item[4:]
+                cs1_count += 1
+            elif casting_item.upper().startswith("CS-"):
                 fg_code = casting_item[3:]
+                cs_count += 1
             else:
                 fg_code = casting_item
 
@@ -99,6 +110,18 @@ def load_wip_data(wip_df: Optional[pd.DataFrame]) -> Dict[str, Dict[str, float]]
                 }
                 total_tsq += tsq
                 parts_with_wip += 1
+                
+                if casting_item.upper().startswith("CS1-"):
+                    cs1_qty_total += tsq
+                elif casting_item.upper().startswith("CS-"):
+                    cs_qty_total += tsq
+
+        print(f"✓ WIP Data Loaded:")
+        print(f"  Parts with WIP: {parts_with_wip}")
+        print(f"  Total TSQ: {total_tsq} units")
+        print(f"  Prefix breakdown:")
+        print(f"    CS- prefix:   {cs_count} items,   {cs_qty_total} units")
+        print(f"    CS1- prefix:  {cs1_count} items,  {cs1_qty_total} units")
 
         return wip_inventory
 
@@ -146,11 +169,19 @@ def process_casting_data(
     
     start_date = config.planning_date
     
+    # --- INTELLIGENT HORIZON SELECTION ---
     if config.planning_end_date:
         end_date = config.planning_end_date
     elif not valid_dates.empty:
         max_date = valid_dates.max()
-        end_date = max_date
+        # CAP the auto-horizon to 90 days to prevent crashes due to massive horizons (e.g. 1 year)
+        limit_date = start_date + pd.Timedelta(days=90)
+        
+        if max_date > limit_date:
+            print(f"Warning: Max order date is {max_date}, but limiting planning horizon to 90 days ({limit_date}) for performance. Please specify an end date to override.")
+            end_date = limit_date
+        else:
+            end_date = max_date
     else:
         # Fallback if no dates and no end date specified
         end_date = config.planning_date + pd.Timedelta(days=30)
@@ -520,6 +551,13 @@ def build_and_solve_enhanced_milp(
     log_path: Optional[str] = None
 ):
     T = list(range(len(days)))
+    
+    # Debug/Log problem size
+    num_products = len(products)
+    num_days = len(days)
+    num_orders = len(order_list)
+    print(f"INFO: Building Model. Products: {num_products}, Days: {num_days}, Orders: {num_orders}")
+    
     small_products = [j for j in products if line.get(j, "small") == "small"]
     big_products = [j for j in products if line.get(j, "small") == "big"]
 
@@ -527,7 +565,12 @@ def build_and_solve_enhanced_milp(
 
     # Variables
     X = pulp.LpVariable.dicts("X", (products, T), lowBound=0, cat="Integer")
-    Y = pulp.LpVariable.dicts("Y", (products, T), lowBound=0, upBound=1, cat="Binary")
+    
+    # OPTIMIZATION: Only create Y variables if changeover cost > 0
+    use_setup_vars = config.pattern_changeover_min > 0.1
+    Y = {}
+    if use_setup_vars:
+        Y = pulp.LpVariable.dicts("Y", (products, T), lowBound=0, upBound=1, cat="Binary")
 
     ShortOrder: Dict[Tuple[str, int], pulp.LpVariable] = {}
     for order in order_list:
@@ -565,20 +608,24 @@ def build_and_solve_enhanced_milp(
 
         # Small line
         if small_products:
-            small_time_today[ti] = (
-                pulp.lpSum(line_time_min.get(j, 0) * X[j][ti] for j in small_products)
-                + config.pattern_changeover_min * pulp.lpSum(Y[j][ti] for j in small_products)
-            )
+            production_time = pulp.lpSum(line_time_min.get(j, 0) * X[j][ti] for j in small_products)
+            setup_time = 0
+            if use_setup_vars:
+                setup_time = config.pattern_changeover_min * pulp.lpSum(Y[j][ti] for j in small_products)
+                
+            small_time_today[ti] = production_time + setup_time
             prob += small_time_today[ti] <= max_time_small_min, f"small_cap_{ti}"
         else:
             small_time_today[ti] = 0
 
         # Big line
         if big_products:
-            big_time_today[ti] = (
-                pulp.lpSum(line_time_min.get(j, 0) * X[j][ti] for j in big_products)
-                + config.pattern_changeover_min * pulp.lpSum(Y[j][ti] for j in big_products)
-            )
+            production_time = pulp.lpSum(line_time_min.get(j, 0) * X[j][ti] for j in big_products)
+            setup_time = 0
+            if use_setup_vars:
+                setup_time = config.pattern_changeover_min * pulp.lpSum(Y[j][ti] for j in big_products)
+            
+            big_time_today[ti] = production_time + setup_time
             prob += big_time_today[ti] <= max_time_big_min, f"big_cap_{ti}"
         else:
             big_time_today[ti] = 0
@@ -593,11 +640,12 @@ def build_and_solve_enhanced_milp(
                 f"box_daily_{box_size}_{ti}",
             )
 
-    # 3. Link X & Y
-    BIG_M = {j: max(demand_boxes.get(j, 0), 1) for j in products}
-    for j in products:
-        for ti in T:
-            prob += X[j][ti] <= BIG_M[j] * Y[j][ti], f"link_{j}_{ti}"
+    # 3. Link X & Y (ONLY IF SETUP VARS ARE USED)
+    if use_setup_vars:
+        BIG_M = {j: max(demand_boxes.get(j, 0), 1) for j in products}
+        for j in products:
+            for ti in T:
+                prob += X[j][ti] <= BIG_M[j] * Y[j][ti], f"link_{j}_{ti}"
 
     # Objective
     obj_parts = []
@@ -650,9 +698,10 @@ def build_and_solve_enhanced_milp(
                     obj_parts.append(config.early_production_penalty * days_early * X[j][ti])
 
     # Part 6: Pattern changeover penalties
-    for ti in T:
-        for j in products:
-            obj_parts.append(config.pattern_changeover_min * Y[j][ti])
+    if use_setup_vars:
+        for ti in T:
+            for j in products:
+                obj_parts.append(config.pattern_changeover_min * Y[j][ti])
 
     prob += pulp.lpSum(obj_parts), "TotalCost"
 
@@ -661,7 +710,7 @@ def build_and_solve_enhanced_milp(
     solver_options = {
         "timeLimit": config.solver_timeout,
         "gapRel": 0.005,
-        "threads": 8,
+        "threads": 4, # Reduce threads to be safe
     }
     
     if log_path:
@@ -718,8 +767,12 @@ def build_and_solve_enhanced_milp(
                 daily_big_boxes += boxes
                 daily_big_time += boxes * line_time_min.get(j, 0)
 
-        small_products_today = len([j for j in products if X[j][ti].value() and X[j][ti].value() > 0.1 and line.get(j) == "small"])
-        big_products_today = len([j for j in products if X[j][ti].value() and X[j][ti].value() > 0.1 and line.get(j) == "big"])
+        small_products_today = 0
+        big_products_today = 0
+        
+        if use_setup_vars:
+             small_products_today = len([j for j in products if X[j][ti].value() and X[j][ti].value() > 0.1 and line.get(j) == "small"])
+             big_products_today = len([j for j in products if X[j][ti].value() and X[j][ti].value() > 0.1 and line.get(j) == "big"])
 
         daily_small_time += config.pattern_changeover_min * small_products_today
         daily_big_time += config.pattern_changeover_min * big_products_today
@@ -931,7 +984,7 @@ def generate_excel_output(schedule_rows, order_shortage_rows, daily_capacity_row
         for col in df.columns:
             if df[col].dtype == "object" or "date" in col.lower():
                 try:
-                    df[col] = pd.to_datetime(df[col], errors="ignore")
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
                     if pd.api.types.is_datetime64_any_dtype(df[col]):
                         df[col] = df[col].dt.strftime("%Y-%m-%d")
                 except Exception:

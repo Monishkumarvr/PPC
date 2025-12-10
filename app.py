@@ -146,7 +146,10 @@ with st.sidebar:
             
     st.subheader("2. Planning Parameters")
     planning_date = st.date_input("Planning Start Date", date.today())
-    planning_end_date = st.date_input("Planning End Date (Optional)", value=None)
+    planning_end_date = st.date_input("Planning End Date (Optional)", value=None, help="If left empty, the system will auto-detect the horizon (max 90 days) to optimize performance.")
+    
+    if planning_end_date is None:
+        st.info("ℹ️ Auto-Horizon: System will plan up to 90 days from start date.")
     
     daily_melt_tons = st.number_input("Daily Melt Capacity (Tons)", value=250.0, step=10.0)
     line_hours = st.number_input("Line Hours per Day", value=16.0, step=1.0)
@@ -165,6 +168,63 @@ with st.sidebar:
     run_btn = st.button("Run Optimization", type="primary", disabled=not file_valid)
 
 # Main Content Area
+
+# --- Authentication Check ---
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+    st.session_state['username'] = None
+
+if 'page' not in st.session_state:
+    st.session_state['page'] = 'Planner'
+
+# --- Login Logic ---
+if not st.session_state['logged_in']:
+    # Initialize DB (creates table if not exists)
+    import database
+    database.init_db()
+    
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.subheader("🔐 Login")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        
+        if st.button("Login", type="primary", use_container_width=True):
+            if database.verify_user(username, password):
+                st.session_state['logged_in'] = True
+                st.session_state['username'] = username
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+                
+    st.stop() # Stop execution here if not logged in
+
+# --- Sidebar Navigation (Only visible if logged in) ---
+with st.sidebar:
+    st.markdown("---")
+    st.subheader(f"👤 User: {st.session_state['username']}")
+    page_selection = st.radio("Navigation", ["Planner", "History"], index=0 if st.session_state['page'] == 'Planner' else 1)
+    st.session_state['page'] = page_selection
+    
+    if st.button("Logout"):
+        st.session_state['logged_in'] = False
+        st.session_state['username'] = None
+        st.rerun()
+
+# --- Page: History ---
+if st.session_state['page'] == "History":
+    import database
+    st.header("📜 Run History")
+    
+    history_df = database.get_history(st.session_state['username'])
+    if not history_df.empty:
+        st.dataframe(history_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No history found for this user.")
+        
+    st.stop()
+
+# --- Page: Planner (Existing Logic) ---
 
 if uploaded_file is None:
     st.info("👋 Welcome! Please upload your **Master Data Excel file** in the sidebar to begin optimization.")
@@ -239,13 +299,16 @@ else:
                 log_path = tmp_log.name
             
             def run_optimization():
-                return optimization_engine.build_and_solve_enhanced_milp(
-                    products, days, demand_boxes, bunch_weight_kg, box_qty,
-                    line_time_min, cycle_days, line, box_size_of, box_max_boxes,
-                    max_melt_kg_per_day, max_time_small_min, max_time_big_min,
-                    order_list, wip_coverage_boxes, gross_demand_boxes, config,
-                    log_path=log_path
-                )
+                try:
+                    return optimization_engine.build_and_solve_enhanced_milp(
+                        products, days, demand_boxes, bunch_weight_kg, box_qty,
+                        line_time_min, cycle_days, line, box_size_of, box_max_boxes,
+                        max_melt_kg_per_day, max_time_small_min, max_time_big_min,
+                        order_list, wip_coverage_boxes, gross_demand_boxes, config,
+                        log_path=log_path
+                    )
+                except Exception as e:
+                    return e
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(run_optimization)
@@ -276,21 +339,44 @@ else:
             except:
                 pass
             
-            status_container.update(label="✅ Optimization Complete!", state="complete", expanded=False)
-
-            # Check results
-            prob = result[0]
-            prob, schedule_rows, order_shortage_rows, daily_capacity_rows, box_utilization_rows = result
-
-            if not schedule_rows and not order_shortage_rows:
-                    st.warning("Optimization finished but returned no schedule. This might mean the problem was infeasible or no orders were selected.")
+            if isinstance(result, Exception):
+                status_container.update(label="❌ Optimization Failed", state="error", expanded=False)
+                st.error(f"Optimization Engine Error: {result}")
             else:
-                st.session_state['results'] = {
-                    'schedule_rows': schedule_rows,
-                    'order_shortage_rows': order_shortage_rows,
-                    'daily_capacity_rows': daily_capacity_rows,
-                    'box_utilization_rows': box_utilization_rows
-                }
+                status_container.update(label="✅ Optimization Complete!", state="complete", expanded=False)
+
+                # Check results
+                prob = result[0]
+                prob, schedule_rows, order_shortage_rows, daily_capacity_rows, box_utilization_rows = result
+
+                if not schedule_rows and not order_shortage_rows:
+                        st.warning("Optimization finished but returned no schedule. This might mean the problem was infeasible or no orders were selected.")
+                else:
+                    st.session_state['results'] = {
+                        'schedule_rows': schedule_rows,
+                        'order_shortage_rows': order_shortage_rows,
+                        'daily_capacity_rows': daily_capacity_rows,
+                        'box_utilization_rows': box_utilization_rows
+                    }
+                    
+                    # Log to History
+                    try:
+                        import database
+                        # Calculate summary metrics for history
+                        total_melt = sum(r['Melt_Used_kg'] for r in daily_capacity_rows) / 1000.0
+                        total_orders = len(order_shortage_rows)
+                        on_time = len([r for r in order_shortage_rows if r['Status'] == 'ON TIME'])
+                        fulfill_pct = (on_time / total_orders * 100) if total_orders > 0 else 0
+                        
+                        database.log_run(
+                            st.session_state['username'],
+                            daily_melt_tons,
+                            total_orders,
+                            fulfill_pct,
+                            total_melt
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not save run to history: {e}")
 
         except Exception as e:
             st.error(f"An error occurred: {e}")
