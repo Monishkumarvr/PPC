@@ -1018,9 +1018,6 @@ def generate_excel_output(schedule_rows, order_shortage_rows, daily_capacity_row
             summary_rows = []
             for box_size in df_boxes["Box_Size"].unique():
                 box_data = df_boxes[df_boxes["Box_Size"] == box_size]
-                if box_data.empty:
-                    continue
-                    
                 total_days = len(box_data)
                 avg_util = box_data["Utilization_%"].mean()
                 max_util = box_data["Utilization_%"].max()
@@ -1073,9 +1070,13 @@ def generate_excel_output(schedule_rows, order_shortage_rows, daily_capacity_row
                     "Additional_Boxes_Needed": additional_boxes,
                 })
 
-            df_investment = pd.DataFrame(investment_rows).sort_values(
-                "Bottleneck_%", ascending=False
-            )
+            if investment_rows:
+                df_investment = pd.DataFrame(investment_rows).sort_values(
+                    "Bottleneck_%", ascending=False
+                )
+            else:
+                df_investment = pd.DataFrame(columns=["Box_Size", "Bottleneck_%", "Priority", "Recommendation", "Additional_Boxes_Needed"])
+            
             df_investment.to_excel(writer, sheet_name="Investment_Plan", index=False)
     
     # Apply coloring (requires saving and reloading, but since we are in memory...)
