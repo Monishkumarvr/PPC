@@ -78,7 +78,9 @@ class GrindingConfig:
             if "Machine Constraints" not in master_data:
                 return
 
-            mc = master_data["Machine Constraints"]
+            
+            # Create a copy to avoid modifying the original dataframe in session state
+            mc = master_data["Machine Constraints"].copy()
             # Normalize column names
             mc.columns = [str(c).strip() for c in mc.columns]
 
