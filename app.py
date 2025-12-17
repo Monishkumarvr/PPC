@@ -541,10 +541,13 @@ if planner_mode == "Grinding":
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as tmp_log:
                     log_path = tmp_log.name
                 
+                # Capture data for thread safety
+                master_data_input = st.session_state['master_data']
+
                 def run_grinding():
                     try:
                         return grinding_optimization_engine.process_data_and_optimize(
-                            st.session_state['master_data'],
+                            master_data_input,
                             casting_schedule_df,
                             start_d,
                             end_d,
