@@ -552,6 +552,19 @@ def process_data_and_optimize(
     # Schedule
     schedule_data = []
     T = list(range(len(days)))
+
+    # Track remaining CS availability after consumption to make the output
+    # easier to reason about.
+    cs_balance = defaultdict(dict)
+    for j in products:
+        cumulative_started = 0.0
+        for ti in T:
+            cumulative_started += StartQty[j][ti].varValue or 0
+            available = (
+                cs_available[j].get(ti, 0)  # cumulative CS released from casting
+                - cumulative_started         # grinding starts consume CS
+            )
+            cs_balance[j][ti] = max(0, available)
     
     for ti in T:
         for j in products:
@@ -564,7 +577,7 @@ def process_data_and_optimize(
                     "Units": round(completed),
                     "Units_Started": round(started),
                     "Resource": grinding_params[j]["resource"],
-                    "CS_Available": cs_available[j].get(ti, 0)
+                    "CS_Available": round(cs_balance[j].get(ti, 0))
                 })
                 
     schedule_df = pd.DataFrame(schedule_data)
@@ -602,7 +615,7 @@ def process_data_and_optimize(
         total_started = sum(StartQty[j][ti].varValue or 0 for j in products)
         daily_data.append({
             "Date": date,
-            "Total_Started": total_started
+            "Total_Started": round(total_started)
         })
     daily_df = pd.DataFrame(daily_data)
     
