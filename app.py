@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 import optimization_engine
 import grinding_optimization_engine
+import database
 import io
 import concurrent.futures
 import time
@@ -127,12 +128,21 @@ if 'grinding_results' not in st.session_state:
 if 'casting_schedule_df' not in st.session_state:
     st.session_state['casting_schedule_df'] = pd.DataFrame()
 
+# --- Database Initialization ---
+@st.cache_resource
+def init_db_connection():
+    try:
+        database.init_db()
+        return True
+    except Exception as e:
+        st.error(f"Failed to initialize database: {e}")
+        return False
+
+# Ensure DB is initialized
+init_db_connection()
+
 # --- Login Logic ---
 if not st.session_state['logged_in']:
-    # Initialize DB (creates table if not exists)
-    import database
-    database.init_db()
-    
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         st.subheader("🔐 Login")
