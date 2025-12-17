@@ -1,0 +1,2 @@
+coinor-cbc
+libsqlite3-dev
