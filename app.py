@@ -117,6 +117,16 @@ if 'page' not in st.session_state:
 if 'planner_mode' not in st.session_state:
     st.session_state['planner_mode'] = 'Casting'
 
+# Initialize data containers
+if 'master_data' not in st.session_state:
+    st.session_state['master_data'] = None
+if 'results' not in st.session_state:
+    st.session_state['results'] = None
+if 'grinding_results' not in st.session_state:
+    st.session_state['grinding_results'] = None
+if 'casting_schedule_df' not in st.session_state:
+    st.session_state['casting_schedule_df'] = pd.DataFrame()
+
 # --- Login Logic ---
 if not st.session_state['logged_in']:
     # Initialize DB (creates table if not exists)
@@ -198,7 +208,7 @@ with st.sidebar:
                 st.error(f"Error reading file: {e}")
 
         # Validate from session state
-        if 'master_data' in st.session_state:
+        if st.session_state.get('master_data') is not None:
             sheet_status = optimization_engine.validate_excel_sheets(st.session_state['master_data'])
             
             st.markdown("**Data Validation:**")
@@ -264,7 +274,7 @@ if planner_mode == "Casting":
             """)
     else:
         # Data Editor Section
-        if file_valid and 'master_data' in st.session_state:
+        if file_valid and st.session_state.get('master_data') is not None:
             st.subheader("📝 Master Data Editor")
             with st.expander("View & Edit Uploaded Data", expanded=True):
                 sheet_status = optimization_engine.validate_excel_sheets(st.session_state['master_data'])
@@ -303,7 +313,10 @@ if planner_mode == "Casting":
                 
                 # 2. Load Data
                 with st.spinner("Processing Data..."):
-                    input_data = st.session_state['master_data']
+                    input_data = st.session_state.get('master_data')
+                    if input_data is None:
+                         raise ValueError("Master Data is missing.")
+
                     (
                         products, days, demand_boxes, bunch_weight_kg, box_qty,
                         line_time_min, cycle_days, line, box_size_of, box_max_boxes,
@@ -381,7 +394,7 @@ if planner_mode == "Casting":
                 st.exception(e)
 
     # Display Casting Results
-    if 'results' in st.session_state and planner_mode == "Casting":
+    if st.session_state.get('results') is not None and planner_mode == "Casting":
         results = st.session_state['results']
         schedule_df = pd.DataFrame(results['schedule_rows'])
         shortage_df = pd.DataFrame(results['order_shortage_rows'])
@@ -445,7 +458,7 @@ if planner_mode == "Casting":
                 for r in recs: st.warning(f"{r['type']}: {r['message']}")
 
         with tab_input:
-            if 'master_data' in st.session_state:
+            if st.session_state.get('master_data') is not None:
                 for k,v in st.session_state['master_data'].items():
                     with st.expander(k): st.dataframe(v)
 
@@ -580,7 +593,7 @@ if planner_mode == "Grinding":
                 st.exception(e)
 
     # Display Grinding Results
-    if 'grinding_results' in st.session_state and planner_mode == "Grinding":
+    if st.session_state.get('grinding_results') is not None and planner_mode == "Grinding":
         g_results = st.session_state['grinding_results']
         g_schedule = g_results['schedule']
         g_fulfill = g_results['fulfillment']
