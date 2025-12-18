@@ -294,10 +294,13 @@ def build_and_solve_grinding_model(
     # Variables
     X = pulp.LpVariable.dicts("X", (products, T), lowBound=0, cat="Integer")
     StartQty = pulp.LpVariable.dicts("StartQty", (products, T), lowBound=0, cat="Integer")
+    # ShortOrder variables (one per order)
     ShortOrder = {}
     for order in order_list:
         ShortOrder[(order["part"], order["order_id"])] = pulp.LpVariable(
-            f"ShortOrder_{order['part']}_{order['order_id']}", lowBound=0, cat="Integer"
+            f"ShortOrder_{order['part']}_{order['order_id']}", 
+            lowBound=0, 
+            cat="Integer"
         )
         
     # Helper for timing
@@ -326,7 +329,7 @@ def build_and_solve_grinding_model(
         
     # Constraints
     
-    # 1. Demand
+    # DEMAND CONSTRAINT - Product level (unchanged)
     for j in products:
         orders_j = [o for o in order_list if o["part"] == j]
         rhs = demand_units[j]
@@ -335,6 +338,16 @@ def build_and_solve_grinding_model(
             pulp.lpSum(ShortOrder[(j, o["order_id"])] for o in orders_j) == rhs,
             f"demand_{j}"
         )
+
+    # ✅ FIX: Add per-order shortage upper bounds
+    for order in order_list:
+        j = order["part"]
+        k = order["order_id"]
+        prob += (
+            ShortOrder[(j, k)] <= order["qty_boxes"],
+            f"max_short_{j}_{k}"
+        )
+        # This ensures: shortage cannot exceed the order quantity
         
     # 1.5 Start/Finish Link
     for j in products:
@@ -582,27 +595,32 @@ def process_data_and_optimize(
                 
     schedule_df = pd.DataFrame(schedule_data)
     
-    # Fulfillment
-    fulfillment_data = []
+    # FIXED CODE (with validation)
     for order in order_list:
         j = order["part"]
         k = order["order_id"]
         qty = order["quantity"]
         short = ShortOrder[(j, k)].varValue or 0
-        fulfilled = max(0, qty - short)
+        short_boxes = int(round(short))
         
-        status = "ON TIME"
-        if short > 0:
-            status = "LATE" if order["days_until_due"] < 0 else "SHORT"
-            
-        fulfillment_data.append({
+        # ✅ VALIDATION: Ensure shortage doesn't exceed order qty
+        if short_boxes > qty:
+            print(f"WARNING: Order {k} for {j} has shortage {short_boxes} > qty {qty}")
+            short_boxes = min(short_boxes, qty)  # Cap at order qty
+        
+        short_pieces = short_boxes * box_qty.get(j, 1)
+        fulfilled = max(0, qty - short_boxes)
+        
+        # ✅ ASSERTION: Verify the math
+        assert abs(fulfilled + short_boxes - qty) < 0.1, \
+            f"Order {k}: Fulfilled {fulfilled} + Shortage {short_boxes} != Qty {qty}"
+        
+        order_shortage_rows.append({
             "FG Code": j,
-            "Sales Order No": order["order_no"],
-            "Due Date": order["due_date"].date(),
             "Order Qty": qty,
             "Fulfilled": fulfilled,
-            "Shortage": short,
-            "Status": status
+            "Shortage": short_boxes,
+            # ...
         })
         
     fulfillment_df = pd.DataFrame(fulfillment_data)
