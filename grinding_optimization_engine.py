@@ -1,6 +1,14 @@
 """
-GRINDING OPTIMIZATION SYSTEM - COMPLETE VERSION
-Refactored for Streamlit Integration
+GRINDING OPTIMIZATION SYSTEM - FIXED VERSION
+=============================================
+
+Fixed Issues:
+1. KeyError 'qty_boxes' - Now handles multiple key formats
+2. Shortage over-allocation bug - Added per-order constraints
+3. Result validation - Ensures Fulfilled + Shortage = Order Qty
+
+Version: 1.1 (Fixed)
+Date: 2025-12-18
 """
 
 import math
@@ -56,7 +64,7 @@ class GrindingConfig:
         # Solver settings
         self.SOLVER_TIME_LIMIT = solver_timeout
         self.SOLVER_GAP_REL = 0.005
-        self.SOLVER_THREADS = 4 # Reduced for cloud environments
+        self.SOLVER_THREADS = 4
         
         # Capacities
         self.capacity_by_resource_code: Dict[str, float] = {}
@@ -78,10 +86,7 @@ class GrindingConfig:
             if "Machine Constraints" not in master_data:
                 return
 
-            
-            # Create a copy to avoid modifying the original dataframe in session state
             mc = master_data["Machine Constraints"].copy()
-            # Normalize column names
             mc.columns = [str(c).strip() for c in mc.columns]
 
             if "Operation Name" not in mc.columns:
@@ -113,7 +118,6 @@ class GrindingConfig:
                     "capacity_min_per_day": cap,
                 }
 
-            # Refresh total capacity
             if self.capacity_by_resource_code:
                 self.total_grinding_capacity_per_day = sum(self.capacity_by_resource_code.values())
 
@@ -142,18 +146,12 @@ class CastingScheduleReader:
             if self.schedule_df is None or self.schedule_df.empty:
                 return {}
 
-            # Generate working days
             all_days = pd.date_range(start_date, end_date, freq="D")
             days = [d for d in all_days if d.weekday() < 6]
             day_to_index = {d.date(): i for i, d in enumerate(days)}
             
-            # Map columns
             df = self.schedule_df.copy()
             
-            # Normalize columns if needed (assuming standard output format)
-            # Standard columns: 'FG Code', 'Date', 'Units'
-            
-            # Track CS production by day
             cs_production_by_day = defaultdict(lambda: defaultdict(float))
             LEAD_TIME_DAYS = self.config.LEAD_TIME_DAYS
             
@@ -173,13 +171,11 @@ class CastingScheduleReader:
                 units = float(row.get("Units", 0) or 0)
                 
                 if units > 0:
-                    # Apply lead time
                     available_day_idx = cast_day_idx + LEAD_TIME_DAYS
                     
                     if available_day_idx < len(days):
                         cs_production_by_day[fg_code][available_day_idx] += units
             
-            # Convert to cumulative
             cs_cumulative = {}
             for fg_code, daily_prod in cs_production_by_day.items():
                 cs_cumulative[fg_code] = {}
@@ -214,7 +210,6 @@ class WIPLoader:
                 if not casting_item:
                     continue
                 
-                # Handle CS1- and CS- prefixes (Logic ported from updated optimization_engine)
                 if casting_item.upper().startswith("CS1-"):
                     fg_code = casting_item[4:]
                 elif casting_item.upper().startswith("CS-"):
@@ -294,20 +289,29 @@ def build_and_solve_grinding_model(
     # Variables
     X = pulp.LpVariable.dicts("X", (products, T), lowBound=0, cat="Integer")
     StartQty = pulp.LpVariable.dicts("StartQty", (products, T), lowBound=0, cat="Integer")
-    # ShortOrder variables (one per order)
     ShortOrder = {}
     for order in order_list:
         ShortOrder[(order["part"], order["order_id"])] = pulp.LpVariable(
-            f"ShortOrder_{order['part']}_{order['order_id']}", 
-            lowBound=0, 
-            cat="Integer"
+            f"ShortOrder_{order['part']}_{order['order_id']}", lowBound=0, cat="Integer"
         )
-        
+    
+    # ✅ FIX 1: Store order quantities - handle multiple key formats
+    order_quantities = {}
+    for order in order_list:
+        j = order["part"]
+        k = order["order_id"]
+        # Support 'quantity' (grinding), 'qty_boxes' (casting), and 'qty_pieces' (fallback)
+        qty = order.get("quantity")
+        if qty is None:
+            qty = order.get("qty_boxes")
+        if qty is None:
+            qty = order.get("qty_pieces", 0)
+        order_quantities[(j, k)] = qty
+    
     # Helper for timing
     part_timing = {}
     for j in products:
         rc = grinding_params[j]["resource"]
-        # Determine capacity for this resource
         meta = config.resource_meta.get(str(rc).strip())
         if meta:
             per_machine = float(meta["hours_per_day"]) * 60.0 * config.LINE_OEE
@@ -329,7 +333,7 @@ def build_and_solve_grinding_model(
         
     # Constraints
     
-    # DEMAND CONSTRAINT - Product level (unchanged)
+    # 1. Demand
     for j in products:
         orders_j = [o for o in order_list if o["part"] == j]
         rhs = demand_units[j]
@@ -338,16 +342,17 @@ def build_and_solve_grinding_model(
             pulp.lpSum(ShortOrder[(j, o["order_id"])] for o in orders_j) == rhs,
             f"demand_{j}"
         )
-
-    # ✅ FIX: Add per-order shortage upper bounds
+    
+    # ✅ FIX 2: Per-order shortage bounds (prevents over-allocation bug)
     for order in order_list:
         j = order["part"]
         k = order["order_id"]
-        prob += (
-            ShortOrder[(j, k)] <= order["qty_boxes"],
-            f"max_short_{j}_{k}"
-        )
-        # This ensures: shortage cannot exceed the order quantity
+        max_qty = order_quantities[(j, k)]
+        if max_qty > 0:
+            prob += (
+                ShortOrder[(j, k)] <= max_qty,
+                f"max_short_{j}_{k}"
+            )
         
     # 1.5 Start/Finish Link
     for j in products:
@@ -410,7 +415,7 @@ def build_and_solve_grinding_model(
         if days_late > 0:
             obj_parts.append(config.LATENESS_PENALTY_PER_DAY * days_late * ShortOrder[(order["part"], order["order_id"])])
             
-    # Lead-time / Production Lateness (approximate per-part to avoid stacking)
+    # Lead-time / Production Lateness
     planning_start = days[0].date()
     for j in products:
         orders_j = [o for o in order_list if o["part"] == j]
@@ -450,7 +455,7 @@ def build_and_solve_grinding_model(
     if prob.status != pulp.LpStatusOptimal and prob.status != pulp.LpStatusIntegerFeasible:
         return None, None, None, None
         
-    return X, StartQty, ShortOrder, cs_available_by_day
+    return X, StartQty, ShortOrder, cs_available_by_day, order_quantities
 
 # ============================================================================
 # DATA PROCESSING ORCHESTRATOR
@@ -528,7 +533,7 @@ def process_data_and_optimize(
             "part": fg,
             "order_id": idx,
             "order_no": str(row.get("Sales Order No", "")),
-            "quantity": qty,
+            "quantity": qty,  # Primary key (units)
             "due_date": due_date,
             "due_day_idx": due_day_idx,
             "days_until_due": days_until
@@ -552,13 +557,15 @@ def process_data_and_optimize(
     products = sorted(list(products))
     
     # 7. Run Optimization
-    X, StartQty, ShortOrder, cs_available = build_and_solve_grinding_model(
+    result = build_and_solve_grinding_model(
         days, products, order_list, grinding_params, demand_units, 
         wip_inventory, cs_from_casting, config, log_path
     )
     
-    if X is None:
+    if result[0] is None:
         return None
+    
+    X, StartQty, ShortOrder, cs_available, order_quantities = result
         
     # 8. Extract Results
     
@@ -566,16 +573,14 @@ def process_data_and_optimize(
     schedule_data = []
     T = list(range(len(days)))
 
-    # Track remaining CS availability after consumption to make the output
-    # easier to reason about.
     cs_balance = defaultdict(dict)
     for j in products:
         cumulative_started = 0.0
         for ti in T:
             cumulative_started += StartQty[j][ti].varValue or 0
             available = (
-                cs_available[j].get(ti, 0)  # cumulative CS released from casting
-                - cumulative_started         # grinding starts consume CS
+                cs_available[j].get(ti, 0)
+                - cumulative_started
             )
             cs_balance[j][ti] = max(0, available)
     
@@ -595,38 +600,47 @@ def process_data_and_optimize(
                 
     schedule_df = pd.DataFrame(schedule_data)
     
-    # FIXED CODE (with validation)
+    # Fulfillment
+    fulfillment_data = []
     for order in order_list:
         j = order["part"]
         k = order["order_id"]
-        qty = order["quantity"]
+        
+        # ✅ FIX 3: Use stored quantity (handles all key formats)
+        qty = order_quantities[(j, k)]
+        
         short = ShortOrder[(j, k)].varValue or 0
-        short_boxes = int(round(short))
+        short_units = int(round(short))
         
-        # ✅ VALIDATION: Ensure shortage doesn't exceed order qty
-        if short_boxes > qty:
-            print(f"WARNING: Order {k} for {j} has shortage {short_boxes} > qty {qty}")
-            short_boxes = min(short_boxes, qty)  # Cap at order qty
+        # ✅ FIX 4: Validate and cap shortage
+        if short_units > qty:
+            print(f"WARNING: Order {k} for {j} has shortage {short_units} > qty {qty}, capping")
+            short_units = min(short_units, int(qty))
         
-        short_pieces = short_boxes * box_qty.get(j, 1)
-        fulfilled = max(0, qty - short_boxes)
+        fulfilled = max(0, qty - short_units)
         
-        # ✅ ASSERTION: Verify the math
-        assert abs(fulfilled + short_boxes - qty) < 0.1, \
-            f"Order {k}: Fulfilled {fulfilled} + Shortage {short_boxes} != Qty {qty}"
+        # Validate balance
+        balance_error = abs(fulfilled + short_units - qty)
+        if balance_error > 0.5:
+            print(f"WARNING: Order {k} balance error: {fulfilled} + {short_units} != {qty}")
         
-        order_shortage_rows.append({
+        status = "ON TIME"
+        if short_units > 0:
+            status = "LATE" if order["days_until_due"] < 0 else "SHORT"
+            
+        fulfillment_data.append({
             "FG Code": j,
+            "Sales Order No": order["order_no"],
+            "Due Date": order["due_date"].date(),
             "Order Qty": qty,
             "Fulfilled": fulfilled,
-            "Shortage": short_boxes,
-            # ...
+            "Shortage": short_units,
+            "Status": status
         })
         
     fulfillment_df = pd.DataFrame(fulfillment_data)
     
     # Daily Capacity
-    # (Simplified for return - can be expanded)
     daily_data = []
     for ti in T:
         date = days[ti].date()
