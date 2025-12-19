@@ -12,6 +12,18 @@ import time
 import tempfile
 import os
 
+def fix_qty_boxes_error():
+    import grinding_optimization_engine as goe
+    _orig = goe.build_and_solve_grinding_model
+    def _patched(*args, **kw):
+        for o in args[2]: 
+            qty = o.get('quantity') or o.get('qty_boxes') or o.get('qty_pieces', 0)
+            o.update({'quantity': qty, 'qty_boxes': qty})
+        return _orig(*args, **kw)
+    goe.build_and_solve_grinding_model = _patched
+
+fix_qty_boxes_error() 
+
 # Set page configuration
 st.set_page_config(
     page_title="Foundry Production Planner",
