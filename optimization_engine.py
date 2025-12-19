@@ -720,7 +720,23 @@ def build_and_solve_enhanced_milp(
         solver_options["msg"] = False
 
     solver = pulp.PULP_CBC_CMD(**solver_options)
-    prob.solve(solver)
+    status = prob.solve(solver)
+    
+    # Check solver status
+    print(f"\n{'='*80}")
+    print(f"SOLVER STATUS: {pulp.LpStatus[status]}")
+    print(f"{'='*80}\n")
+    
+    if status == pulp.LpStatusInfeasible:
+        print("❌ PROBLEM IS INFEASIBLE")
+        print("   No feasible solution exists with current constraints")
+        print(f"   Problem size: {prob.numVariables()} variables, {prob.numConstraints()} constraints")
+        return prob, [], [], [], []
+    elif status != pulp.LpStatusOptimal and status != pulp.LpStatusIntegerFeasible:
+        print(f"⚠️  Solver status: {pulp.LpStatus[status]}")
+        return prob, [], [], [], []
+    
+    print("✅ Optimal solution found!\n")
 
     if prob.status != pulp.LpStatusOptimal and prob.status != pulp.LpStatusIntegerFeasible:
         # Just return empty if failed, or handle gracefully
