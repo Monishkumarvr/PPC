@@ -80,12 +80,17 @@ def load_wip_data(wip_df: Optional[pd.DataFrame]) -> Dict[str, Dict[str, float]]
 
             # Convert CS1-XXX-XXX or CS-XXX-XXX to XXX-XXX
             # Handle CS1- first as it is longer
-            if casting_item.upper().startswith("CS1-"):
+            casting_item_upper = casting_item.upper()
+
+            # Handle CS1- with hyphen (e.g., CS1-ARM-007)
+            if casting_item_upper.startswith("CS1-"):
                 fg_code = casting_item[4:]
-                cs1_count += 1
-            elif casting_item.upper().startswith("CS-"):
+            # Handle CS1 without hyphen (e.g., CS1ARM-007) 🆕 NEW!
+            elif casting_item_upper.startswith("CS1"):
                 fg_code = casting_item[3:]
-                cs_count += 1
+            # Handle CS- with hyphen (e.g., CS-ARM-007)
+            elif casting_item_upper.startswith("CS-"):
+                fg_code = casting_item[3:]
             else:
                 fg_code = casting_item
 
