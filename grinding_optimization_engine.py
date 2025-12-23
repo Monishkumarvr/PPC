@@ -210,9 +210,13 @@ class WIPLoader:
                 if not casting_item:
                     continue
                 
-                if casting_item.upper().startswith("CS1-"):
+                casting_item_upper = casting_item.upper()
+
+                if casting_item_upper.startswith("CS1-"):
                     fg_code = casting_item[4:]
-                elif casting_item.upper().startswith("CS-"):
+                elif casting_item_upper.startswith("CS1"):
+                    fg_code = casting_item[3:]
+                elif casting_item_upper.startswith("CS-"):
                     fg_code = casting_item[3:]
                 else:
                     fg_code = casting_item
